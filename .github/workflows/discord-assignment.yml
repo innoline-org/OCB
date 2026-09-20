@@ -1,0 +1,109 @@
+name: Discord assignment notifications
+
+# Discord's native /github webhook renderer silently accepts (204) but does not
+# render `issues.assigned/unassigned` or `pull_request.assigned/unassigned`.
+# This workflow posts those events itself, and @-mentions the assignee.
+#
+# pull_request_target is used rather than pull_request so that fork PRs can
+# still read the webhook secret. It is safe here because this job never checks
+# out or executes any PR-authored code.
+
+on:
+  issues:
+    types: [assigned, unassigned]
+  pull_request_target:
+    types: [assigned, unassigned]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-assignment-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post assignment to Discord
+        env:
+          # Every value is passed through the environment and read by jq via
+          # --arg, never interpolated into the shell, so a hostile issue or
+          # branch title cannot inject commands.
+          ISSUE_WEBHOOK: ${{ secrets.DISCORD_ISSUES_WEBHOOK }}
+          PR_WEBHOOK: ${{ secrets.DISCORD_PR_WEBHOOK }}
+          USER_MAP: ${{ vars.DISCORD_USER_MAP }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          TITLE: ${{ github.event.issue.title || github.event.pull_request.title }}
+          URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+          ASSIGNEE: ${{ github.event.assignee.login }}
+          ASSIGNEE_AVATAR: ${{ github.event.assignee.avatar_url }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "issues" ]; then
+            WEBHOOK="${ISSUE_WEBHOOK:-}"; KIND="Issue"
+          else
+            WEBHOOK="${PR_WEBHOOK:-}";    KIND="Pull request"
+          fi
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::No Discord webhook secret configured for $EVENT; skipping."
+            exit 0
+          fi
+
+          # Resolve the GitHub login to a Discord user id so the notification
+          # actually pings. Falls back to the bare login when unmapped.
+          DISCORD_ID=""
+          if [ -n "${USER_MAP:-}" ]; then
+            DISCORD_ID=$(printf '%s' "$USER_MAP" \
+              | jq -r --arg l "$ASSIGNEE" '.[$l] // ""' 2>/dev/null || echo "")
+          fi
+          if [ -n "$DISCORD_ID" ]; then
+            WHO="<@${DISCORD_ID}>"
+          else
+            WHO="**${ASSIGNEE}**"
+            echo "::notice::No DISCORD_USER_MAP entry for '${ASSIGNEE}'; posting without a ping."
+          fi
+
+          if [ "$ACTION" = "assigned" ]; then
+            HEADING="${KIND} assigned: #${NUMBER} ${TITLE}"
+            CONTENT="${WHO} you were assigned to ${KIND,,} #${NUMBER} by ${ACTOR}"
+            COLOR=5793266
+          else
+            HEADING="${KIND} unassigned: #${NUMBER} ${TITLE}"
+            CONTENT="${WHO} you were unassigned from ${KIND,,} #${NUMBER} by ${ACTOR}"
+            COLOR=10070709
+          fi
+
+          jq -n \
+            --arg content "$CONTENT" \
+            --arg title "$HEADING" \
+            --arg url "$URL" \
+            --arg repo "$REPO" \
+            --arg icon "$ASSIGNEE_AVATAR" \
+            --arg actor "$ACTOR" \
+            --arg assignee "$ASSIGNEE" \
+            --argjson color "$COLOR" \
+            '{
+               content: $content,
+               allowed_mentions: { parse: ["users"] },
+               embeds: [{
+                 title: $title,
+                 url: $url,
+                 color: $color,
+                 thumbnail: { url: $icon },
+                 fields: [
+                   { name: "Assignee", value: $assignee, inline: true },
+                   { name: "Changed by", value: $actor, inline: true }
+                 ],
+                 footer: { text: $repo }
+               }]
+             }' > payload.json
+
+          curl -sS --fail-with-body -X POST \
+            -H "Content-Type: application/json" \
+            -d @payload.json "$WEBHOOK"
