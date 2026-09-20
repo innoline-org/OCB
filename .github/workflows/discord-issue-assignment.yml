@@ -1,0 +1,53 @@
+name: Discord issue assignment
+
+on:
+  issues:
+    types: [assigned, unassigned]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post assignment to Discord
+        env:
+          # Values are passed through env, never interpolated into the shell,
+          # so an issue title cannot inject commands.
+          WEBHOOK: ${{ secrets.DISCORD_ISSUES_WEBHOOK }}
+          ACTION: ${{ github.event.action }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ASSIGNEE: ${{ github.event.assignee.login }}
+          ASSIGNEE_AVATAR: ${{ github.event.assignee.avatar_url }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "DISCORD_ISSUES_WEBHOOK secret is not set; skipping." >&2
+            exit 0
+          fi
+          if [ "$ACTION" = "assigned" ]; then
+            TITLE="Issue assigned: #${ISSUE_NUMBER} ${ISSUE_TITLE}"
+            DESC="**${ASSIGNEE}** was assigned by **${ACTOR}**"
+            COLOR=5793266
+          else
+            TITLE="Issue unassigned: #${ISSUE_NUMBER} ${ISSUE_TITLE}"
+            DESC="**${ASSIGNEE}** was unassigned by **${ACTOR}**"
+            COLOR=10070709
+          fi
+          jq -n \
+            --arg title "$TITLE" \
+            --arg url "$ISSUE_URL" \
+            --arg desc "$DESC" \
+            --arg repo "$REPO" \
+            --arg icon "$ASSIGNEE_AVATAR" \
+            --argjson color "$COLOR" \
+            '{embeds:[{title:$title,url:$url,description:$desc,color:$color,
+              thumbnail:{url:$icon},footer:{text:$repo}}]}' > payload.json
+          curl -sS --fail-with-body -X POST \
+            -H "Content-Type: application/json" \
+            -d @payload.json "$WEBHOOK"
