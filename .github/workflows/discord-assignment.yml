@@ -17,9 +17,11 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: discord-assignment-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: false
+# No `concurrency` group here, deliberately. Keying one per issue/PR number
+# looks tidy but GitHub keeps only a single pending run per group, so
+# assigning several people at once cancels all but one and silently drops
+# those notifications. Verified: 3 simultaneous assignees produced 2 runs and
+# 1 cancellation. These posts are short and independent, so let them race.
 
 jobs:
   notify:
