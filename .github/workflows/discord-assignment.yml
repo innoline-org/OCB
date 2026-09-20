@@ -55,28 +55,41 @@ jobs:
             exit 0
           fi
 
-          # Resolve the GitHub login to a Discord user id so the notification
+          # Resolve a GitHub login to a Discord mention so the notification
           # actually pings. Falls back to the bare login when unmapped.
-          DISCORD_ID=""
-          if [ -n "${USER_MAP:-}" ]; then
-            DISCORD_ID=$(printf '%s' "$USER_MAP" \
-              | jq -r --arg l "$ASSIGNEE" '.[$l] // ""' 2>/dev/null || echo "")
-          fi
-          if [ -n "$DISCORD_ID" ]; then
-            WHO="<@${DISCORD_ID}>"
-          else
-            WHO="**${ASSIGNEE}**"
-            echo "::notice::No DISCORD_USER_MAP entry for '${ASSIGNEE}'; posting without a ping."
-          fi
+          mention() {
+            local login="$1" id=""
+            [ -z "$login" ] && { printf 'someone'; return; }
+            if [ -n "${USER_MAP:-}" ]; then
+              id=$(printf '%s' "$USER_MAP" | jq -r --arg l "$login" '.[$l] // ""' 2>/dev/null || echo "")
+            fi
+            if [ -n "$id" ]; then
+              printf '<@%s>' "$id"
+            else
+              echo "::notice::No DISCORD_USER_MAP entry for '${login}'; posting that name without a ping." >&2
+              printf '**%s**' "$login"
+            fi
+          }
+
+          WHO=$(mention "$ASSIGNEE")   # the person assigned or unassigned
+          BY=$(mention "$ACTOR")       # the person who made the change
 
           if [ "$ACTION" = "assigned" ]; then
             HEADING="${KIND} assigned: #${NUMBER} ${TITLE}"
-            CONTENT="${WHO} you were assigned to ${KIND,,} #${NUMBER} by ${ACTOR}"
             COLOR=5793266
+            if [ "$ACTOR" = "$ASSIGNEE" ]; then
+              CONTENT="${WHO} self-assigned ${KIND,,} #${NUMBER}"
+            else
+              CONTENT="${WHO} you were assigned to ${KIND,,} #${NUMBER} by ${BY}"
+            fi
           else
             HEADING="${KIND} unassigned: #${NUMBER} ${TITLE}"
-            CONTENT="${WHO} you were unassigned from ${KIND,,} #${NUMBER} by ${ACTOR}"
             COLOR=10070709
+            if [ "$ACTOR" = "$ASSIGNEE" ]; then
+              CONTENT="${WHO} removed themselves from ${KIND,,} #${NUMBER}"
+            else
+              CONTENT="${WHO} you were unassigned from ${KIND,,} #${NUMBER} by ${BY}"
+            fi
           fi
 
           jq -n \
